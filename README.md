@@ -20,3 +20,9 @@ $ vi .local/php/etc/php.ini
 extension_dir = /usr/lib64/php/modules/
 extension = redis.so
 ```
+
+## start Redis
+```
+$ sudo service redis start
+$ sudo chkconfig redis on
+```
