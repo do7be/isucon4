@@ -27,6 +27,11 @@ function configure() {
 
   option('db_conn', $db);
 
+  // redisをつかう
+  $redis = new Redis();
+  $redis->connect("127.0.0.1",6379);
+  option('redis', $redis);
+
   $config = [
     'user_lock_threshold' => getenv('ISU4_USER_LOCK_THRESHOLD') ?: 3,
     'ip_ban_threshold' => getenv('ISU4_IP_BAN_THRESHOLD') ?: 10
@@ -64,57 +69,82 @@ function login_log($succeeded, $login, $user_id=null) {
 
 function user_locked($user) {
   if (empty($user)) { return null; }
-
-  $db = option('db_conn');
-  $stmt = $db->prepare('SELECT COUNT(1) AS failures FROM login_log WHERE user_id = :user_id AND id > IFNULL((select id from login_log where user_id = :user_id AND succeeded = 1 ORDER BY id DESC LIMIT 1), 0)');
-  $stmt->bindValue(':user_id', $user['id']);
-  $stmt->execute();
-  $log = $stmt->fetch(PDO::FETCH_ASSOC);
+  // redisをつかう
+  $redis = option('redis');
+  $value = $redis->get($user['id']) ?: 0;
 
   $config = option('config');
-  return $config['user_lock_threshold'] <= $log['failures'];
+  return $config['user_lock_threshold'] <= $value;
 }
 
 # FIXME
 function ip_banned() {
-  $db = option('db_conn');
-  $stmt = $db->prepare('SELECT COUNT(1) AS failures FROM login_log WHERE ip = :ip AND id > IFNULL((select id from login_log where ip = :ip AND succeeded = 1 ORDER BY id DESC LIMIT 1), 0)');
-  $stmt->bindValue(':ip', $_SERVER['REMOTE_ADDR']);
-  $stmt->execute();
-  $log = $stmt->fetch(PDO::FETCH_ASSOC);
-
   $config = option('config');
-  return $config['ip_ban_threshold'] <= $log['failures'];
+
+  // redisをつかう
+  $redis = option('redis');
+  $value = $redis->get($_SERVER['REMOTE_ADDR']) ?: 0;
+
+  return $config['ip_ban_threshold'] <= $value;
+
 }
 
 function attempt_login($login, $password) {
   $db = option('db_conn');
 
+  // redisをつかう
+  $redis = option('redis');
+  
+  // mysqlのまま（あとでけす）
   $stmt = $db->prepare('SELECT * FROM users WHERE login = :login');
   $stmt->bindValue(':login', $login);
   $stmt->execute();
   $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
   if (ip_banned()) {
-    login_log(false, $login, isset($user['id']) ? $user['id'] : null);
+ //   login_log(false, $login, isset($user['id']) ? $user['id'] : null);
+    $value = $redis->get($user['id']) ?: 0;
+    $redis->set($user['id'], $value+1);
+    $ban_count = $redis->get($_SERVER['REMOTE_ADDR']) ?: 0;
+    $redis->set($_SERVER['REMOTE_ADDR'], $ban_count+1);
+
     return ['error' => 'banned'];
   }
 
   if (user_locked($user)) {
-    login_log(false, $login, $user['id']);
+ //   login_log(false, $login, $user['id']);
+    $value = $redis->get($user['id']) ?: 0;
+    $redis->set($user['id'], $value+1);
+    $ban_count = $redis->get($_SERVER['REMOTE_ADDR']) ?: 0;
+    $redis->set($_SERVER['REMOTE_ADDR'], $ban_count+1);
+
     return ['error' => 'locked'];
   }
 
   if (!empty($user) && calculate_password_hash($password, $user['salt']) == $user['password_hash']) {
-    login_log(true, $login, $user['id']);
-    return ['user' => $user];
+  //  login_log(true, $login, $user['id']);
+ 
+    $redis->set($user['id'], 0);
+    $redis->set($_SERVER['REMOTE_ADDR'], 0);
+    $redis->set('last_login'.$user['id'], time());
+
+   return ['user' => $user];
   }
   elseif (!empty($user)) {
-    login_log(false, $login, $user['id']);
+    // 値をセットする
+    $value = $redis->get($user['id']) ?: 0;
+    $redis->set($user['id'], $value+1);
+    $ban_count = $redis->get($_SERVER['REMOTE_ADDR']) ?: 0;
+    $redis->set($_SERVER['REMOTE_ADDR'], $ban_count+1);
+
+  //  login_log(false, $login, $user['id']);
     return ['error' => 'wrong_password'];
   }
   else {
-    login_log(false, $login);
+    $ban_count = $redis->get($_SERVER['REMOTE_ADDR']) ?: 0;
+    $redis->set($_SERVER['REMOTE_ADDR'], $ban_count+1);
+
+  //  login_log(false, $login, $user['id']);
     return ['error' => 'wrong_login'];
   }
 }
@@ -145,13 +175,9 @@ function last_login() {
     return null;
   }
 
-  $db = option('db_conn');
-
-  $stmt = $db->prepare('SELECT * FROM login_log WHERE succeeded = 1 AND user_id = :id ORDER BY id DESC LIMIT 2');
-  $stmt->bindValue(':id', $user['id']);
-  $stmt->execute();
-  $stmt->fetch();
-  return $stmt->fetch(PDO::FETCH_ASSOC);
+  $redis = option('redis');
+  $value = $redis->get('last_login'.$user['id']);
+  return $value; 
 }
 
 function banned_ips() {
@@ -250,7 +276,9 @@ dispatch_get('/mypage', function() {
   }
   else {
     set('user', $user);
-    set('last_login', last_login());
+    $last_login_time = last_login();
+    $last_login_info = array('created_at'=>$last_login_time, 'ip'=>$_SERVER['REMOTE_ADDR']);
+    set('last_login', $last_login_info);
     return html('mypage.html.php');
   }
 });
