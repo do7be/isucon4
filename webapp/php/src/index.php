@@ -57,21 +57,40 @@ function calculate_password_hash($password, $salt) {
 }
 
 function login_log($succeeded, $login, $user_id=null) {
-  $db = option('db_conn');
 
-  $stmt = $db->prepare('INSERT INTO login_log (`created_at`, `user_id`, `login`, `ip`, `succeeded`) VALUES (NOW(),:user_id,:login,:ip,:succeeded)');
-  $stmt->bindValue(':user_id', $user_id);
-  $stmt->bindValue(':login', $login);
-  $stmt->bindValue(':ip', $_SERVER['REMOTE_ADDR']);
-  $stmt->bindValue(':succeeded', $succeeded ? 1 : 0);
-  $stmt->execute();
+  $redis = option('redis');
+
+  if ($succeeded) {
+    $redis->set('locked_user_'.$user_id, 0);
+    $redis->set('ban_ip_'.$_SERVER['REMOTE_ADDR'], 0);
+    
+    $last_login_time = $redis->get('login_'.$user_id);
+    $last_login_ip = $redis->get('login_ip_'.$user_id);
+
+    if (!is_null($last_login_time)){
+    $redis->set('last_login_'.$user_id, $last_login_time);
+    }
+    if (!is_null($last_login_ip)){
+    $redis->set('last_login_ip_'.$user_id, $last_login_ip);
+    }
+
+
+    $redis->set('login_'.$user_id, date("Y-m-d H:i:s", time()));
+    $redis->set('login_ip_'.$user_id, $_SERVER['REMOTE_ADDR']);
+  }
+  else {
+    if (!is_null($user_id)) {
+      $redis->incr('locked_user_'.$user_id);
+    }
+    $redis->incr('ban_ip_'.$_SERVER['REMOTE_ADDR']);
+  }
 }
 
 function user_locked($user) {
   if (empty($user)) { return null; }
   // redisをつかう
   $redis = option('redis');
-  $value = $redis->get($user['id']) ?: 0;
+  $value = $redis->get('locked_user_'.$user['id']) ?: 0;
 
   $config = option('config');
   return $config['user_lock_threshold'] <= $value;
@@ -83,7 +102,7 @@ function ip_banned() {
 
   // redisをつかう
   $redis = option('redis');
-  $value = $redis->get($_SERVER['REMOTE_ADDR']) ?: 0;
+  $value = $redis->get('ban_ip_'.$_SERVER['REMOTE_ADDR']) ?: 0;
 
   return $config['ip_ban_threshold'] <= $value;
 
@@ -102,49 +121,26 @@ function attempt_login($login, $password) {
   $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
   if (ip_banned()) {
- //   login_log(false, $login, isset($user['id']) ? $user['id'] : null);
-    $value = $redis->get($user['id']) ?: 0;
-    $redis->set($user['id'], $value+1);
-    $ban_count = $redis->get($_SERVER['REMOTE_ADDR']) ?: 0;
-    $redis->set($_SERVER['REMOTE_ADDR'], $ban_count+1);
-
+    login_log(false, $login, isset($user['id']) ? $user['id'] : null);
     return ['error' => 'banned'];
   }
 
   if (user_locked($user)) {
- //   login_log(false, $login, $user['id']);
-    $value = $redis->get($user['id']) ?: 0;
-    $redis->set($user['id'], $value+1);
-    $ban_count = $redis->get($_SERVER['REMOTE_ADDR']) ?: 0;
-    $redis->set($_SERVER['REMOTE_ADDR'], $ban_count+1);
-
+    login_log(false, $login, $user['id']);
     return ['error' => 'locked'];
   }
 
   if (!empty($user) && calculate_password_hash($password, $user['salt']) == $user['password_hash']) {
-  //  login_log(true, $login, $user['id']);
- 
-    $redis->set($user['id'], 0);
-    $redis->set($_SERVER['REMOTE_ADDR'], 0);
-    $redis->set('last_login'.$user['id'], time());
-
-   return ['user' => $user];
+    login_log(true, $login, $user['id']);
+    return ['user' => $user];
   }
   elseif (!empty($user)) {
     // 値をセットする
-    $value = $redis->get($user['id']) ?: 0;
-    $redis->set($user['id'], $value+1);
-    $ban_count = $redis->get($_SERVER['REMOTE_ADDR']) ?: 0;
-    $redis->set($_SERVER['REMOTE_ADDR'], $ban_count+1);
-
-  //  login_log(false, $login, $user['id']);
+    login_log(false, $login, $user['id']);
     return ['error' => 'wrong_password'];
   }
   else {
-    $ban_count = $redis->get($_SERVER['REMOTE_ADDR']) ?: 0;
-    $redis->set($_SERVER['REMOTE_ADDR'], $ban_count+1);
-
-  //  login_log(false, $login, $user['id']);
+    login_log(false, $login, $user['id']);
     return ['error' => 'wrong_login'];
   }
 }
@@ -176,37 +172,27 @@ function last_login() {
   }
 
   $redis = option('redis');
-  $value = $redis->get('last_login'.$user['id']);
-  return $value; 
+  $last_login_time = $redis->get('last_login_'.$user['id']);
+  $last_login_ip = $redis->get('last_login_ip_'.$user['id']);
+
+  $ret = array('created_at'=>$last_login_time, 'ip'=>$last_login_ip);
+
+  return $ret; 
 }
 
 function banned_ips() {
   $threshold = option('config')['ip_ban_threshold'];
   $ips = [];
+  
+  $redis = option('redis');
 
-  $db = option('db_conn');
 
-  $stmt = $db->prepare('SELECT ip FROM (SELECT ip, MAX(succeeded) as max_succeeded, COUNT(1) as cnt FROM login_log GROUP BY ip) AS t0 WHERE t0.max_succeeded = 0 AND t0.cnt >= :threshold');
-  $stmt->bindValue(':threshold', $threshold);
-  $stmt->execute();
-  $not_succeeded = $stmt->fetchAll(PDO::FETCH_COLUMN, 0);
-  $ips = array_merge($not_succeeded);
-
-  $stmt = $db->prepare('SELECT ip, MAX(id) AS last_login_id FROM login_log WHERE succeeded = 1 GROUP by ip');
-  $stmt->execute();
-  $last_succeeds = $stmt->fetchAll();
-
-  foreach ($last_succeeds as $row) {
-    $stmt = $db->prepare('SELECT COUNT(1) AS cnt FROM login_log WHERE ip = :ip AND :id < id');
-    $stmt->bindValue(':ip', $row['ip']);
-    $stmt->bindValue(':id', $row['last_login_id']);
-    $stmt->execute();
-    $count = $stmt->fetch(PDO::FETCH_ASSOC)['cnt'];
-    if ($threshold <= $count) {
-      array_push($ips, $row['ip']);
+  $ban_ips = $redis->keys('ban*');
+  foreach($ban_ips as $ban_ip) {
+    if ($redis->get($ban_ip) >= $threshold) {
+      array_push($ips, substr($ban_ip, 7));
     }
   }
-
   return $ips;
 }
 
@@ -214,26 +200,12 @@ function locked_users() {
   $threshold = option('config')['user_lock_threshold'];
   $user_ids = [];
 
-  $db = option('db_conn');
+  $redis = option('redis');
 
-  $stmt = $db->prepare('SELECT login FROM (SELECT user_id, login, MAX(succeeded) as max_succeeded, COUNT(1) as cnt FROM login_log GROUP BY user_id) AS t0 WHERE t0.user_id IS NOT NULL AND t0.max_succeeded = 0 AND t0.cnt >= :threshold');
-  $stmt->bindValue(':threshold', $threshold);
-  $stmt->execute();
-  $not_succeeded = $stmt->fetchAll(PDO::FETCH_COLUMN, 0);
-  $user_ids = array_merge($not_succeeded);
-
-  $stmt = $db->prepare('SELECT user_id, login, MAX(id) AS last_login_id FROM login_log WHERE user_id IS NOT NULL AND succeeded = 1 GROUP BY user_id');
-  $stmt->execute();
-  $last_succeeds = $stmt->fetchAll();
-
-  foreach ($last_succeeds as $row) {
-    $stmt = $db->prepare('SELECT COUNT(1) AS cnt FROM login_log WHERE user_id = :user_id AND :id < id');
-    $stmt->bindValue(':user_id', $row['user_id']);
-    $stmt->bindValue(':id', $row['last_login_id']);
-    $stmt->execute();
-    $count = $stmt->fetch(PDO::FETCH_ASSOC)['cnt'];
-    if ($threshold <= $count) {
-      array_push($user_ids, $row['login']);
+  $locked_users = $redis->keys('locked*');
+  foreach($locked_users as $locked_user) {
+    if ($redis->get($locked_user) >= $threshold) {
+      array_push($user_ids, substr($locked_user, 12));
     }
   }
 
@@ -276,9 +248,8 @@ dispatch_get('/mypage', function() {
   }
   else {
     set('user', $user);
-    $last_login_time = last_login();
-    $last_login_info = array('created_at'=>$last_login_time, 'ip'=>$_SERVER['REMOTE_ADDR']);
-    set('last_login', $last_login_info);
+    $last_login = last_login();
+    set('last_login', $last_login);
     return html('mypage.html.php');
   }
 });
