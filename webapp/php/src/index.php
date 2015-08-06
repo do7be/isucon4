@@ -92,7 +92,7 @@ function user_locked($user) {
   $value = $redis->get('locked_user_'.$user['id']) ?: 0;
 
   $config = option('config');
-  return $config['user_lock_threshold'] <= $value;
+  return $value && $config['user_lock_threshold'] <= $value;
 }
 
 # FIXME
@@ -103,7 +103,7 @@ function ip_banned() {
   $redis = option('redis');
   $value = $redis->get('ban_ip_'.$_SERVER['REMOTE_ADDR']) ?: 0;
 
-  return $config['ip_ban_threshold'] <= $value;
+  return $value && $config['ip_ban_threshold'] <= $value;
 
 }
 
