@@ -68,12 +68,11 @@ function login_log($succeeded, $login, $user_id=null) {
     $last_login_ip = $redis->get('login_ip_'.$user_id);
 
     if (!is_null($last_login_time)){
-    $redis->set('last_login_'.$user_id, $last_login_time);
+        $redis->set('last_login_'.$user_id, $last_login_time);
     }
     if (!is_null($last_login_ip)){
-    $redis->set('last_login_ip_'.$user_id, $last_login_ip);
+        $redis->set('last_login_ip_'.$user_id, $last_login_ip);
     }
-
 
     $redis->set('login_'.$user_id, date("Y-m-d H:i:s", time()));
     $redis->set('login_ip_'.$user_id, $_SERVER['REMOTE_ADDR']);
@@ -140,7 +139,7 @@ function attempt_login($login, $password) {
     return ['error' => 'wrong_password'];
   }
   else {
-    login_log(false, $login, $user['id']);
+    login_log(false, $login);
     return ['error' => 'wrong_login'];
   }
 }
