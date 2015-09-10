@@ -26,3 +26,16 @@ extension = redis.so
 $ sudo service redis start
 $ sudo chkconfig redis on
 ```
+
+## Log
+
+success:85490 fail:19104 score:19307(work load=16)
+
+```
+sudo vi /etc/sysctl
+net.ipv4.tcp_tw_recycle = 1
+
+$ sudo sysctl -p
+```
+
+success:140940 fail:0 score:30451(work load=16)
